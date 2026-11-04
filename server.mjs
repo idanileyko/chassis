@@ -26,6 +26,7 @@
  * log is append-only; the kill switch halts all runs.
  */
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import { readFile, writeFile, stat } from 'node:fs/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
 import crypto from 'node:crypto';
@@ -54,16 +55,26 @@ const chassis = {
   runs: 0,
   failStreaks: {},         // "profileId:expectationId" -> consecutive failure count
   lastRunAt: {},           // profileId -> epoch ms of last completed sweep
+  council: {},             // profileId -> latest council result (advisory only)
 };
 
-/** Persist safety-relevant state so a restart never silently forgets a gate. */
-async function saveState() {
+/** Persist safety-relevant state so a restart never silently forgets a gate.
+ * Writes are serialized through a promise chain — raiseGate's un-awaited
+ * saveState must never interleave with another write (learned the hard way:
+ * an interleaved write once produced a state file loadState couldn't parse). */
+let stateWriteChain = Promise.resolve();
+function saveState() {
+  stateWriteChain = stateWriteChain.then(writeStateFile).catch(() => {});
+  return stateWriteChain;
+}
+async function writeStateFile() {
   try {
     await writeFile(STATE_FILE, JSON.stringify({
       gates: chassis.gates,
       killSwitch: chassis.killSwitch,
       failStreaks: chassis.failStreaks,
       lastRunAt: chassis.lastRunAt,
+      council: chassis.council,
       runs: chassis.runs,
     }, null, 2));
   } catch { /* best effort; audit remains the durable record */ }
@@ -76,6 +87,7 @@ async function loadState() {
     if (typeof s.killSwitch === 'boolean') chassis.killSwitch = s.killSwitch;
     if (s.failStreaks && typeof s.failStreaks === 'object') chassis.failStreaks = s.failStreaks;
     if (s.lastRunAt && typeof s.lastRunAt === 'object') chassis.lastRunAt = s.lastRunAt;
+    if (s.council && typeof s.council === 'object') chassis.council = s.council;
     if (typeof s.runs === 'number') chassis.runs = s.runs;
   } catch { /* no prior state — fresh boot */ }
 }
@@ -172,7 +184,7 @@ async function runExpectation(e) {
       const wantStatus = e.assert?.status ?? 200;
       const ok = r.status === wantStatus;
       return { ...base, ok, value: r.status, latencyMs: latency,
-        detail: `HTTP ${r.status} in ${latency}ms (want ${wantStatus})`,
+        detail: `HTTP ${r.status} in ${latency}ms (want status ${wantStatus}; latency budget ${e.assert?.maxLatencyMs || 3000}ms)`,
         band: !ok ? 'hard' : latency > (e.assert?.maxLatencyMs || 3000) ? 'warn' : 'pass' };
     }
     if (e.primitive === 'file') {
@@ -365,6 +377,7 @@ function handleChassisState(req, res) {
     audit: chassis.audit.slice(-100),
     reportCards: chassis.reportCards,
     mcpManifests: chassis.mcpManifests,
+    council: chassis.council,
   });
 }
 
@@ -389,6 +402,295 @@ async function handleKillSwitch(req, res) {
   audit({ type: 'killswitch', armed: chassis.killSwitch });
   await saveState();
   send(res, 200, { ok: true, killSwitch: chassis.killSwitch });
+}
+
+/* ============================ THE COUNCIL (Room B) ============================
+ * Three divergent cognitive archetypes read a PRUNED evidence packet for one
+ * profile and return strict JSON verdicts. They propose; they never dispose —
+ * no advisor path can open or close a gate by itself. Convergent anomaly flags
+ * (>=2 advisors, same anomaly id) raise an ADVISORY gate for a human, so the
+ * council surfaces leaks before a CRITICAL expectation hard-fails.
+ * ========================================================================== */
+const COUNCIL_ARCHETYPES = [
+  {
+    id: 'sentry',
+    role: 'SKEPTIC',
+    temperature: 0.7,
+    directive:
+      `You are SENTRY, the council's adversarial auditor. Your prior: the system is lying until ` +
+      `proven otherwise. Hunt false greens — checks that pass while degraded (warn bands, latency ` +
+      `creeping toward budget, stale sweeps), blind spots in what the probes actually measure, and ` +
+      `single points of failure. You tolerate false positives: a false alarm costs minutes, a missed ` +
+      `leak costs the project. If the evidence looks clean, your job is to name what is NOT being ` +
+      `measured that should worry us. On a clean packet you still conclude risk_level >= 4 unless you ` +
+      `can cite specific evidence strength. Never write "everything looks fine".`,
+  },
+  {
+    id: 'operator',
+    role: 'OPERATOR',
+    temperature: 0.3,
+    directive:
+      `You are OPERATOR, the pragmatist. Your prior: noise is the enemy — you only flag what needs a ` +
+      `human inside the next 24 hours; everything else is green. You distrust hypothetical failures and ` +
+      `unmeasured-boogeyman arguments: if nothing is on fire and no gate is open, verdict green with a ` +
+      `low risk_level, and your anomalies list may be empty. Your value to the council is refusing to ` +
+      `cry wolf. Never write "everything looks fine".`,
+  },
+  {
+    id: 'lattice',
+    role: 'STRUCTURALIST',
+    temperature: 0.5,
+    directive:
+      `You are LATTICE, the systems thinker. You read across expectations: trends, correlations, and ` +
+      `cascades — what does a warn-band here plus latency drift there imply about the substrate they ` +
+      `share? You care about trajectory, not snapshots: is the system drifting toward its budgets even ` +
+      `while every check passes? You sit between the alarmist and the pragmatist by evidence, not by ` +
+      `courtesy. Never write "everything looks fine".`,
+  },
+];
+
+const COUNCIL_OUTPUT_SCHEMA = `{
+  "advisor_id": "<your archetype id>",
+  "verdict": "green|amber|red",
+  "risk_level": <integer 0-10; green<=3, amber=4-6, red>=7>,
+  "confidence": <0.0-1.0>,
+  "anomalies": [
+    { "id": "<short-kebab-slug>", "check": "<id of the checks[] entry this concerns, or null if systemic>",
+      "severity": "info|warning|critical",
+      "evidence": "<specific field(s) from the packet>",
+      "reasoning": "<one or two sentences>" }
+  ],
+  "action_items": [ { "action": "<imperative, machine-parseable>", "priority": <1=now,2=soon,3=backlog>, "rationale": "<short>" } ],
+  "disagreement": "<one sentence: how your reading differs from what the archetype named below would most likely conclude>"
+}`;
+
+/** Pruned per-profile evidence. Directive 1: only what this profile's council
+ * needs — no global state, no audit tail, no other profiles' telemetry. */
+function buildEvidencePacket(profile) {
+  const cards = Object.values(chassis.reportCards[profile.id] || {});
+  const profGates = chassis.gates.filter((g) => g.profileId === profile.id);
+  return {
+    profile: { id: profile.id, name: profile.name, kind: profile.kind, description: profile.description || '' },
+    advisory_scope: {
+      display_only: true,
+      never_touches: profile.advisorPolicy?.forbidden || [],
+      max_tools: profile.advisorPolicy?.maxTools ?? null,
+    },
+    sweep: {
+      total_runs: chassis.runs,
+      last_sweep_age_s: Math.round((Date.now() - (chassis.lastRunAt[profile.id] || 0)) / 1000),
+      schedule_window_s: Math.round(Math.min(...profile.expectations.map((e) => parseScheduleMs(e.schedule))) / 1000),
+      kill_switch_armed: chassis.killSwitch,
+    },
+    checks: cards.map((c) => ({
+      id: c.id,
+      ok: c.ok,
+      band: c.band,
+      severity: c.severity,
+      grade: c.grade,
+      latency_ms: typeof c.latencyMs === 'number' ? c.latencyMs : null,
+      detail: c.detail,
+      consecutive_failures: chassis.failStreaks[`${profile.id}:${c.id}`] || 0,
+    })),
+    open_gates: profGates.filter((g) => g.status === 'open')
+      .map((g) => ({ label: g.label, detail: g.detail, raised_at: g.raisedAt })),
+    recent_decisions: profGates.filter((g) => g.status !== 'open').slice(-3)
+      .map((g) => ({ label: g.label, decision: g.decision, note: g.note })),
+  };
+}
+
+/** Spawn the brain bridge. Resolves to {content, brain} or null on any failure. */
+function callAdvisorLLM({ system, user, temperature }) {
+  return new Promise((resolve) => {
+    const child = spawn('python3', [path.join(__dirname, 'advisor_llm.py')], { timeout: 180_000 });
+    let out = '';
+    let settled = false;
+    const done = (val) => { if (!settled) { settled = true; resolve(val); } };
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', () => done(null));
+    child.on('close', (code) => {
+      if (code !== 0 && code !== null) return done(null);
+      try {
+        const r = JSON.parse(out);
+        if (r.error || !r.content) return done(null);
+        done({ content: String(r.content), brain: r.brain || 'unknown' });
+      } catch { done(null); }
+    });
+    child.stdin.write(JSON.stringify({ system, user, temperature }));
+    child.stdin.end();
+  });
+}
+
+/** Strict JSON extraction + validation. Returns {opinion, error}. */
+function validateOpinion(content, archetype) {
+  if (!content) return { error: 'empty reply' };
+  let text = String(content).trim();
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) text = fence[1].trim();
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) return { error: 'no JSON object found' };
+  let obj;
+  try { obj = JSON.parse(text.slice(start, end + 1)); }
+  catch (e) { return { error: `JSON parse: ${e.message}` }; }
+  if (obj.advisor_id !== archetype.id) return { error: `advisor_id must be "${archetype.id}"` };
+  if (!['green', 'amber', 'red'].includes(obj.verdict)) return { error: 'verdict must be green|amber|red' };
+  const risk = Math.round(Number(obj.risk_level));
+  if (!Number.isFinite(risk) || risk < 0 || risk > 10) return { error: 'risk_level must be integer 0-10' };
+  const confidence = Number(obj.confidence);
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) return { error: 'confidence must be 0-1' };
+  if (!Array.isArray(obj.anomalies)) return { error: 'anomalies must be an array' };
+  if (!Array.isArray(obj.action_items)) return { error: 'action_items must be an array' };
+  if (typeof obj.disagreement !== 'string' || !obj.disagreement.trim()) return { error: 'disagreement is required' };
+  const anomalies = obj.anomalies.slice(0, 6).map((a) => ({
+    id: String(a.id || 'unnamed').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'unnamed',
+    check: typeof a.check === 'string' && /^[a-z0-9-]+$/.test(a.check) ? a.check : null,
+    severity: ['info', 'warning', 'critical'].includes(a.severity) ? a.severity : 'warning',
+    evidence: String(a.evidence || '').slice(0, 240),
+    reasoning: String(a.reasoning || '').slice(0, 400),
+  }));
+  const action_items = obj.action_items.slice(0, 6).map((i) => ({
+    action: String(i.action || '').slice(0, 200),
+    priority: [1, 2, 3].includes(i.priority) ? i.priority : 2,
+    rationale: String(i.rationale || '').slice(0, 240),
+  }));
+  return {
+    opinion: {
+      advisor_id: archetype.id,
+      role: archetype.role,
+      verdict: obj.verdict,
+      risk_level: risk,
+      confidence: Math.round(confidence * 100) / 100,
+      anomalies,
+      action_items,
+      disagreement: obj.disagreement.trim().slice(0, 400),
+      offline: false,
+    },
+  };
+}
+
+function offlineOpinion(archetype, reason) {
+  return {
+    advisor_id: archetype.id,
+    role: archetype.role,
+    verdict: 'amber',
+    risk_level: 5,
+    confidence: 0.1,
+    anomalies: [{ id: 'council-offline', severity: 'warning', evidence: reason, reasoning: 'council brain unreachable — the chassis is flying without analytical coverage' }],
+    action_items: [{ action: 'restore council LLM bridge', priority: 1, rationale: 'no independent verification of telemetry' }],
+    disagreement: 'n/a — advisor offline',
+    offline: true,
+  };
+}
+
+function councilSystemPrompt(archetype, profile, persona, others) {
+  return [
+    `You are ${archetype.role} (${archetype.id}), one of three advisors on the CHASSIS council for ${profile.name} (${profile.kind}).`,
+    `Domain context: ${profile.description || 'no description provided.'}`,
+    `Room B charter (non-negotiable): you are display-only advisory. You propose; a human disposes. You never see credentials, never touch the execution path. Forbidden surfaces: ${(profile.advisorPolicy?.forbidden || []).join(', ') || 'none declared'}. Your output is parsed by a machine, not read as prose.`,
+    persona ? `This project's standing advisory persona: ${persona}` : '',
+    '',
+    archetype.directive,
+    '',
+    `COUNCIL PROTOCOL — divergence is mandatory, echo chambers are failure. The other two archetypes are ${others.map((o) => `${o.role} (${o.id})`).join(' and ')}. Evaluate the evidence independently FIRST. Then, in "disagreement", state in one sentence how your reading differs from what ${others[0].role} would most likely conclude from the same packet. If you end up agreeing, disagreement must instead name the specific evidence that would change your mind.`,
+    '',
+    'EVIDENCE PACKET (pruned to this profile — it is all you get; do not assume facts not in it):',
+    '',
+    'OUTPUT CONTRACT — respond with ONE JSON object and nothing else. No prose, no markdown fences, no commentary:',
+    COUNCIL_OUTPUT_SCHEMA,
+  ].filter(Boolean).join('\n');
+}
+
+async function conveneCouncil(profile) {
+  const packet = buildEvidencePacket(profile);
+  const persona = profile.rooms?.advisors?.[0]?.persona || '';
+  const opinions = [];
+  const brains = new Set();
+
+  for (const arch of COUNCIL_ARCHETYPES) {
+    const others = COUNCIL_ARCHETYPES.filter((a) => a.id !== arch.id);
+    const system = councilSystemPrompt(arch, profile, persona, others);
+    let opinion = null;
+    let lastError = null;
+    for (let attempt = 0; attempt < 2 && !opinion; attempt++) {
+      const user = attempt === 0
+        ? `Evidence packet:\n${JSON.stringify(packet, null, 2)}\n\nRespond with the JSON object only.`
+        : `Evidence packet:\n${JSON.stringify(packet, null, 2)}\n\nYour previous reply failed validation or the brain was unreachable (${lastError}). Respond again with ONLY the corrected JSON object — no prose, no fences.`;
+      const r = await callAdvisorLLM({ system, user, temperature: arch.temperature });
+      if (!r) { lastError = 'brain unreachable'; continue; }
+      brains.add(r.brain);
+      const v = validateOpinion(r.content, arch);
+      if (v.opinion) { opinion = v.opinion; }
+      else lastError = v.error;
+    }
+    opinions.push(opinion || offlineOpinion(arch, lastError || 'brain unreachable'));
+  }
+
+  const online = opinions.filter((o) => !o.offline);
+  const risks = online.map((o) => o.risk_level);
+  const spread = risks.length >= 2 ? Math.max(...risks) - Math.min(...risks) : 0;
+  const reds = online.filter((o) => o.risk_level >= 7).length;
+  const ambers = online.filter((o) => o.risk_level >= 4 && o.risk_level <= 6).length;
+  const consensus_verdict = reds >= 2 ? 'red' : (reds + ambers) >= 2 ? 'amber' : 'green';
+
+  // Convergence feedback: same anomaly id flagged by >=2 online advisors
+  // (severity warning+) -> ADVISORY gate. Council proposes; the inbox disposes.
+  let convergence_gates = 0;
+  if (online.length >= 2) {
+    const flagged = {};
+    for (const o of online) {
+      for (const a of o.anomalies) {
+        if (a.severity === 'info' || a.id === 'council-offline') continue;
+        // converge on the check the anomaly concerns (fallback: anomaly slug)
+        const key = a.check || a.id;
+        (flagged[key] ||= { advisors: [], items: [] });
+        if (!flagged[key].advisors.includes(o.advisor_id)) flagged[key].advisors.push(o.advisor_id);
+        flagged[key].items.push({ advisor: o.advisor_id, severity: a.severity, reasoning: a.reasoning, evidence: a.evidence });
+      }
+    }
+    for (const [key, f] of Object.entries(flagged)) {
+      if (f.advisors.length < 2) continue;
+      const gate = raiseGate({
+        profileId: profile.id,
+        expectationId: `council:${key}`,
+        label: `ADVISORY COUNCIL — ${key}`,
+        detail: `Convergent flag (${f.advisors.join(' + ')}): ${f.items.map((i) => `[${i.advisor}] ${i.reasoning}`).join(' | ')}`,
+      });
+      if (gate) convergence_gates += 1;
+    }
+  }
+
+  const result = {
+    at: new Date().toISOString(),
+    profileId: profile.id,
+    brain: [...brains].join('+') || 'none',
+    consensus_verdict,
+    risk_spread: spread,
+    convergence_gates,
+    opinions,
+  };
+  chassis.council[profile.id] = result;
+  audit({
+    type: 'council.convened', profileId: profile.id, brain: result.brain,
+    consensus: consensus_verdict, spread,
+    opinions: opinions.map((o) => `${o.advisor_id}:${o.offline ? 'OFFLINE' : `${o.verdict}/${o.risk_level}`}`),
+    convergence_gates,
+  });
+  await saveState();
+  return result;
+}
+
+async function handleCouncil(req, res) {
+  const { profileId } = await readBody(req);
+  const profile = chassis.profiles.get(profileId);
+  if (!profile) return send(res, 404, { error: `unknown profile "${profileId}"` });
+  audit({ type: 'council.requested', profileId });
+  try {
+    const result = await conveneCouncil(profile);
+    send(res, 200, { ok: true, council: result });
+  } catch (e) {
+    send(res, 500, { error: String(e.message || e) });
+  }
 }
 
 async function handleMcpHandshake(req, res) {
@@ -765,6 +1067,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/chassis/run' && req.method === 'POST') return await handleChassisRun(req, res);
     if (url.pathname === '/api/chassis/state' && req.method === 'GET') return handleChassisState(req, res);
     if (url.pathname === '/api/chassis/killswitch' && req.method === 'POST') return await handleKillSwitch(req, res);
+    if (url.pathname === '/api/chassis/council' && req.method === 'POST') return await handleCouncil(req, res);
     const gateMatch = url.pathname.match(/^\/api\/chassis\/gates\/([a-z0-9-]+)\/respond$/);
     if (gateMatch && req.method === 'POST') return await handleGateRespond(req, res, gateMatch[1]);
     if (req.method === 'GET') return await serveStatic(req, res, url);
