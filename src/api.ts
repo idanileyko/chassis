@@ -1,4 +1,4 @@
-import type { ChassisEvent, ChassisState, Profile, ProfileSummary } from './types';
+import type { ChassisEvent, ChassisState, CouncilResult, Profile, ProfileSummary } from './types';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(path, init);
@@ -35,6 +35,14 @@ export function setKillSwitch(armed: boolean): Promise<{ ok: boolean; killSwitch
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ armed }),
+  });
+}
+
+export function conveneCouncil(profileId: string): Promise<{ ok: boolean; council: CouncilResult }> {
+  return req('/api/chassis/council', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profileId }),
   });
 }
 

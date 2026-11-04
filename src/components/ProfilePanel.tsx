@@ -6,9 +6,11 @@ interface Props {
   full: Profile | null;
   running: boolean;
   killSwitch: boolean;
+  convening: boolean;
   onSelect: (id: string) => void;
   onRun: () => void;
   onHandshake: () => void;
+  onConvene: () => void;
 }
 
 const SEV_COLOR: Record<Severity, string> = { info: 'var(--accent)', warning: 'var(--warn)', critical: 'var(--crit)' };
@@ -70,6 +72,9 @@ export default function ProfilePanel(p: Props) {
               </button>
               <button className="btn" onClick={p.onHandshake} disabled={p.running}>
                 MCP HANDSHAKE
+              </button>
+              <button className="btn" onClick={p.onConvene} disabled={p.running || p.convening}>
+                {p.convening ? 'COUNCIL IN SESSION…' : 'CONVENE COUNCIL'}
               </button>
             </div>
           </>

@@ -88,6 +88,41 @@ export interface AuditEntry {
   [k: string]: unknown;
 }
 
+export interface CouncilAnomaly {
+  id: string;
+  severity: 'info' | 'warning' | 'critical';
+  evidence: string;
+  reasoning: string;
+}
+
+export interface CouncilActionItem {
+  action: string;
+  priority: 1 | 2 | 3;
+  rationale: string;
+}
+
+export interface CouncilOpinion {
+  advisor_id: string;
+  role: string;
+  verdict: 'green' | 'amber' | 'red';
+  risk_level: number;
+  confidence: number;
+  anomalies: CouncilAnomaly[];
+  action_items: CouncilActionItem[];
+  disagreement: string;
+  offline?: boolean;
+}
+
+export interface CouncilResult {
+  at: string;
+  profileId: string;
+  brain: string;
+  consensus_verdict: 'green' | 'amber' | 'red';
+  risk_spread: number;
+  convergence_gates: number;
+  opinions: CouncilOpinion[];
+}
+
 export interface ChassisState {
   gates: Gate[];
   killSwitch: boolean;
@@ -95,6 +130,7 @@ export interface ChassisState {
   audit: AuditEntry[];
   reportCards: Record<string, Record<string, ReportCard>>;
   mcpManifests: Record<string, { hash: string; tools: number; at: string }>;
+  council?: Record<string, CouncilResult>;
 }
 
 export type ChassisEvent =

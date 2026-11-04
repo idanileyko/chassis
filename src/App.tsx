@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   checkBackend, fetchChassisState, fetchProfile, fetchProfiles,
-  runProbes, setKillSwitch,
+  runProbes, setKillSwitch, conveneCouncil,
 } from './api';
 import type {
-  ChassisEvent, ChassisState, Gate, Profile, ProfileSummary,
+  ChassisEvent, ChassisState, CouncilResult, Gate, Profile, ProfileSummary,
   ReportCard, ThemeName,
 } from './types';
 import Header from './components/Header';
@@ -13,6 +13,7 @@ import Floor from './components/Floor';
 import ProfilePanel from './components/ProfilePanel';
 import Inbox from './components/Inbox';
 import ReportCards from './components/ReportCards';
+import CouncilPanel from './components/CouncilPanel';
 import LogPanel, { type LogLine } from './components/LogPanel';
 
 const DEMO_PROFILE: Profile = {
@@ -50,6 +51,8 @@ export default function App() {
   const [probeState, setProbeState] = useState<Record<string, { state: 'running' | 'done'; ok?: boolean }>>({});
   const [gates, setGates] = useState<Gate[]>([]);
   const [handshakeNote, setHandshakeNote] = useState<string | null>(null);
+  const [council, setCouncil] = useState<CouncilResult | null>(null);
+  const [convening, setConvening] = useState(false);
 
   const demo = !backend;
   const pushLog = useCallback((kind: LogLine['kind'], text: string) => {
@@ -79,6 +82,14 @@ export default function App() {
     })();
     return () => { alive = false; };
   }, [pushLog]);
+
+  /* ---------- load latest council for the active profile ---------- */
+  useEffect(() => {
+    if (!activeId || demo) return;
+    fetchChassisState()
+      .then((st) => setCouncil(st.council?.[activeId] ?? null))
+      .catch(() => {});
+  }, [activeId, demo]);
 
   /* ---------- load full profile ---------- */
   useEffect(() => {
@@ -192,6 +203,31 @@ export default function App() {
     pushLog('info', 'MCP handshake: no servers configured on this host');
   }, [pushLog]);
 
+  /* ---------- convene the council ---------- */
+  const convene = useCallback(async () => {
+    if (!activeId || demo) {
+      pushLog('info', 'council requires a live backend — nothing to advise on in demo mode');
+      return;
+    }
+    setConvening(true);
+    pushLog('run', `council convening — ${activeId} (three archetypes, pruned packet)`);
+    try {
+      const r = await conveneCouncil(activeId);
+      setCouncil(r.council);
+      pushLog(
+        r.council.consensus_verdict === 'red' ? 'gate' : 'ok',
+        `council adjourned — consensus ${r.council.consensus_verdict.toUpperCase()}, spread ${r.council.risk_spread}/10` +
+        (r.council.convergence_gates ? `, ${r.council.convergence_gates} advisory gate(s) raised` : ''),
+      );
+      const st = await fetchChassisState().catch(() => null);
+      if (st) { setState(st); setGates(st.gates); }
+    } catch (err) {
+      pushLog('gate', `council failed: ${String(err)}`);
+    } finally {
+      setConvening(false);
+    }
+  }, [activeId, demo, pushLog]);
+
   const openGates = gates.filter((g) => g.status === 'open').length;
 
   const tickerItems = useMemo(() => {
@@ -230,9 +266,11 @@ export default function App() {
           full={full}
           running={running}
           killSwitch={kill}
+          convening={convening}
           onSelect={setActiveId}
           onRun={run}
           onHandshake={handshake}
+          onConvene={convene}
         />
 
         <div className="center-col">
@@ -242,6 +280,7 @@ export default function App() {
 
         <div className="right-col">
           <Inbox gates={gates} demo={demo} onDecided={() => fetchChassisState().then((st) => { setGates(st.gates); setState(st); pushLog('audit', 'gate decided by operator'); }).catch(() => {})} />
+          <CouncilPanel council={council} />
           <ReportCards cards={cards} />
         </div>
       </div>
