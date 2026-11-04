@@ -12,8 +12,8 @@ override, and an audit trail that never forgets.
 │ http · sql     │──▶│ severity tiers       │──▶│ scoped,          │──▶│ A–F report │
 │ cli · file     │   │ dual-signal gates    │   │ display-only,    │   │ cards per  │
 │ metric · canary│   │ kill switch          │   │ maxTools ≤ 8     │   │ expectation│
-└────────────────┘   │ dead-man scheduler   │   │ budget caps      │   └────────────┘
-                     └──────────┬───────────┘   └──────────────────┘
+└────────────────┘   │ dead-man scheduler   │   └──────────────────┘   └────────────┘
+                     └──────────┬───────────┘
                                 ▼
                         Gate Inbox (human authority) → append-only JSONL audit
 ```
@@ -22,6 +22,12 @@ override, and an audit trail that never forgets.
 - **Expectation primitives** — `http`, `sql`, `cli`, `file`, `metric` (memory or real `statfs` disk headroom), plus a **canary** self-test in every sweep (a probe guaranteed to fail; if it passes, the runner is lying → META gate).
 - **Dual-signal rule** — CRITICAL gates require ≥2 consecutive failed sweeps before firing; streaks persist to disk.
 - **Dead-man's switch** — a profile silent beyond 2× its schedule window raises a gate (suppressed while the kill switch is armed).
+- **The Council (Room B)** — three divergent LLM archetypes (SKEPTIC / OPERATOR / STRUCTURALIST) read a
+  **pruned** per-profile evidence packet and return strict JSON verdicts (`risk_level`, `anomalies[]`,
+  `action_items[]`, mandatory `disagreement`). Divergence is a feature, not a bug. Convergent flags
+  (≥2 advisors, same check) raise an **ADVISORY** gate — the council proposes, a human disposes.
+  Brain: agent-gw when `KIMI_API_KEY` is set, credential-free pollinations fallback otherwise
+  (`advisor_llm.py`); a dead brain degrades to a structured OFFLINE verdict, never a crash.
 - **MCP handshake** — connects to MCP servers, sha256-hashes tool schemas to detect rug pulls.
 - **State** — gates, kill switch, fail streaks, last-run times persist in `chassis-state.json` (gitignored); audit is append-only `chassis-audit.jsonl` (gitignored).
 
@@ -39,6 +45,7 @@ Node 20+, no frameworks on the backend (plain `node:http`), SSE-streamed sweeps.
 
 ```
 server.mjs        backend: static host + JSON API + SSE sweeps + scheduler
+advisor_llm.py    council brain bridge (agent-gw → pollinations fallback)
 profiles/         one JSON per watched project
 src/              React console (3 themes: intelligence / tactical / light)
 docs/             architecture spec (archify JSON)

@@ -71,6 +71,18 @@
       },
       "severity": "warning",
       "schedule": "300s"
+    },
+    {
+      "id": "degraded-endpoint",
+      "primitive": "http",
+      "label": "Upstream dependency latency",
+      "target": "https://api.github.com/zen",
+      "assert": {
+        "status": 200,
+        "maxLatencyMs": 50
+      },
+      "severity": "warning",
+      "schedule": "300s"
     }
   ],
   "advisorPolicy": {
