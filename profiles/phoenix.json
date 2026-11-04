@@ -1,0 +1,38 @@
+{
+  "id": "phoenix",
+  "name": "PHOENIX",
+  "kind": "options-trading",
+  "description": "Rules-based options trader on Railway/MySQL. Deterministic execution; AI is display-only advisory, never decision authority.",
+  "rooms": {
+    "readers": [
+      { "id": "broker-adapter", "label": "BROKER ADAPTER", "detail": "fill feed · arrival marks", "kind": "mcp" },
+      { "id": "market-data", "label": "MARKET DATA", "detail": "quotes · greeks surface", "kind": "mcp" },
+      { "id": "vendor-health", "label": "VENDOR WATCH", "detail": "shape + status probes", "kind": "probes" }
+    ],
+    "advisors": [
+      { "id": "risk-advisor", "label": "RISK ADVISOR", "detail": "report cards in · proposals out", "persona": "You comment on scored evidence only. You never see credentials, never propose orders, never touch the execution path.", "tools": ["read_report_cards", "read_probe_results", "draft_proposal"] }
+    ]
+  },
+  "expectations": [
+    { "id": "api-health", "primitive": "http", "label": "API health shape", "target": "https://api.github.com/zen", "assert": { "status": 200, "maxLatencyMs": 3000 }, "severity": "critical", "schedule": "300s" },
+    { "id": "repo-present", "primitive": "file", "label": "Repo checkout present", "target": "profiles/phoenix.json", "assert": { "exists": true, "maxBytes": 65536 }, "severity": "warning", "schedule": "600s" },
+    { "id": "policy-intact", "primitive": "file", "label": "Policy spine drift check", "target": "server.mjs", "assert": { "exists": true }, "severity": "critical", "schedule": "600s" },
+    { "id": "disk-headroom", "primitive": "metric", "label": "Disk headroom", "assert": { "kind": "disk", "min": 104857600 }, "severity": "warning", "schedule": "300s" }
+  ],
+  "advisorPolicy": {
+    "maxTools": 3,
+    "scopes": ["read:report_cards", "read:probe_results", "write:proposals"],
+    "forbidden": ["execution_path", "credentials", "order_intent"],
+    "budgetPerRunTokens": 20000
+  },
+  "gates": {
+    "criticalRequiresHuman": true,
+    "maxOpen": 5
+  },
+  "oracle": {
+    "rubrics": [
+      { "id": "fill-vs-arrival", "label": "FILL vs ARRIVAL", "gradeBands": { "A": 0.0, "B": 0.25, "C": 0.75, "D": 1.5, "F": 999 } },
+      { "id": "replay-divergence", "label": "GATE 0 REPLAY", "gradeBands": { "A": 0.0, "B": 0.001, "C": 0.01, "D": 0.05, "F": 999 } }
+    ]
+  }
+}

@@ -1,0 +1,108 @@
+{
+  "id": "hla",
+  "name": "HLA_ENGINE",
+  "kind": "real-estate-leadgen",
+  "description": "Provider-based address enumeration with viewport maps and Drizzle DB. Data pipeline with provider integrations.",
+  "rooms": {
+    "readers": [
+      {
+        "id": "provider-a",
+        "label": "PROVIDER A",
+        "detail": "address enumeration feed",
+        "kind": "mcp"
+      },
+      {
+        "id": "viewport-maps",
+        "label": "VIEWPORT MAPS",
+        "detail": "tile + boundary service",
+        "kind": "mcp"
+      },
+      {
+        "id": "db-mirror",
+        "label": "DB MIRROR",
+        "detail": "Drizzle migrations watch",
+        "kind": "probes"
+      }
+    ],
+    "advisors": [
+      {
+        "id": "pipeline-advisor",
+        "label": "PIPELINE ADVISOR",
+        "persona": "You review scored pipeline evidence only. No provider credentials, no mutation of the enumeration queue.",
+        "tools": [
+          "read_report_cards",
+          "read_probe_results",
+          "draft_proposal"
+        ]
+      }
+    ]
+  },
+  "expectations": [
+    {
+      "id": "provider-shape",
+      "primitive": "http",
+      "label": "Provider endpoint shape",
+      "target": "https://example.com/",
+      "assert": {
+        "status": 200,
+        "maxLatencyMs": 5000
+      },
+      "severity": "warning",
+      "schedule": "300s"
+    },
+    {
+      "id": "migrations-present",
+      "primitive": "file",
+      "label": "Migration trail present",
+      "target": "profiles/hla.json",
+      "assert": {
+        "exists": true
+      },
+      "severity": "info",
+      "schedule": "900s"
+    },
+    {
+      "id": "disk-headroom",
+      "primitive": "metric",
+      "label": "Disk headroom",
+      "assert": {
+        "kind": "disk",
+        "min": 104857600
+      },
+      "severity": "warning",
+      "schedule": "300s"
+    }
+  ],
+  "advisorPolicy": {
+    "maxTools": 3,
+    "scopes": [
+      "read:report_cards",
+      "read:probe_results",
+      "write:proposals"
+    ],
+    "forbidden": [
+      "provider_credentials",
+      "queue_mutation"
+    ],
+    "budgetPerRunTokens": 15000
+  },
+  "gates": {
+    "criticalRequiresHuman": true,
+    "maxOpen": 5
+  },
+  "oracle": {
+    "rubrics": [
+      {
+        "id": "provider-shape-drift",
+        "label": "PROVIDER SHAPE DRIFT",
+        "gradeBands": {
+          "A": 0,
+          "B": 1,
+          "C": 3,
+          "D": 8,
+          "F": 999
+        }
+      }
+    ]
+  }
+}
