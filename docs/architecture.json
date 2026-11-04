@@ -1,0 +1,319 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "CHASSIS — Agent Operations Console",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1380,
+      760
+    ]
+  },
+  "components": [
+    {
+      "id": "targets",
+      "type": "external",
+      "label": "Watched Targets",
+      "sublabel": "APIs · files",
+      "pos": [
+        30,
+        80
+      ],
+      "size": [
+        176,
+        64
+      ]
+    },
+    {
+      "id": "mcp",
+      "type": "external",
+      "label": "MCP Servers",
+      "sublabel": "schema hash · drift",
+      "pos": [
+        30,
+        240
+      ],
+      "size": [
+        176,
+        64
+      ]
+    },
+    {
+      "id": "profiles",
+      "type": "database",
+      "label": "Profile Store",
+      "sublabel": "profiles/*.json",
+      "pos": [
+        30,
+        400
+      ],
+      "size": [
+        176,
+        64
+      ]
+    },
+    {
+      "id": "room-a",
+      "type": "backend",
+      "label": "Room A — Readers",
+      "sublabel": "expectation runner",
+      "pos": [
+        260,
+        200
+      ],
+      "size": [
+        160,
+        74
+      ]
+    },
+    {
+      "id": "wall",
+      "type": "security",
+      "label": "The Wall",
+      "sublabel": "policy + kill switch",
+      "pos": [
+        500,
+        200
+      ],
+      "size": [
+        160,
+        74
+      ]
+    },
+    {
+      "id": "oracle",
+      "type": "backend",
+      "label": "Oracle",
+      "sublabel": "A–F report cards",
+      "pos": [
+        740,
+        200
+      ],
+      "size": [
+        150,
+        74
+      ]
+    },
+    {
+      "id": "inbox",
+      "type": "frontend",
+      "label": "Gate Inbox",
+      "sublabel": "approve / deny",
+      "pos": [
+        940,
+        200
+      ],
+      "size": [
+        150,
+        74
+      ]
+    },
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "Operator",
+      "sublabel": "human authority",
+      "pos": [
+        1200,
+        200
+      ],
+      "size": [
+        130,
+        70
+      ]
+    },
+    {
+      "id": "advisor",
+      "type": "backend",
+      "label": "Room B — Advisors",
+      "sublabel": "scoped · display-only",
+      "pos": [
+        840,
+        470
+      ],
+      "size": [
+        170,
+        76
+      ]
+    },
+    {
+      "id": "console",
+      "type": "frontend",
+      "label": "Console UI",
+      "sublabel": "The Floor",
+      "pos": [
+        1110,
+        470
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "audit",
+      "type": "database",
+      "label": "Audit Log",
+      "sublabel": "append-only JSONL",
+      "pos": [
+        1150,
+        640
+      ],
+      "size": [
+        170,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "chassis backend (server.mjs)",
+      "wraps": [
+        "room-a",
+        "wall",
+        "oracle",
+        "advisor"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "probes",
+      "from": "targets",
+      "to": "room-a",
+      "label": "probes",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "tools",
+      "from": "mcp",
+      "to": "room-a",
+      "label": "MCP tools",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "expectations",
+      "from": "profiles",
+      "to": "room-a",
+      "label": "expectations",
+      "fromSide": "right",
+      "toSide": "bottom"
+    },
+    {
+      "id": "results",
+      "from": "room-a",
+      "to": "wall",
+      "label": "probe results",
+      "labelDy": -20
+    },
+    {
+      "id": "evidence",
+      "from": "wall",
+      "to": "oracle",
+      "label": "evidence",
+      "labelDy": -20,
+      "variant": "emphasis"
+    },
+    {
+      "id": "gates",
+      "from": "wall",
+      "to": "inbox",
+      "label": "CRITICAL gates",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [
+        [
+          580,
+          90
+        ],
+        [
+          1015,
+          90
+        ]
+      ]
+    },
+    {
+      "id": "cards-sse",
+      "from": "oracle",
+      "to": "console",
+      "label": "report cards · SSE",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "cards-in",
+      "from": "oracle",
+      "to": "advisor",
+      "label": "cards in",
+      "fromSide": "left",
+      "toSide": "left"
+    },
+    {
+      "id": "proposals",
+      "from": "advisor",
+      "to": "console",
+      "label": "proposals",
+      "labelDy": -20
+    },
+    {
+      "id": "await",
+      "from": "inbox",
+      "to": "operator",
+      "label": "awaiting human",
+      "variant": "security",
+      "labelDy": -20
+    },
+    {
+      "id": "decision",
+      "from": "operator",
+      "to": "wall",
+      "label": "approve / deny",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "top"
+    },
+    {
+      "id": "audit-write",
+      "from": "wall",
+      "to": "audit",
+      "label": "every decision",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "ctl",
+      "from": "operator",
+      "to": "console",
+      "label": "sweep control",
+      "fromSide": "bottom",
+      "toSide": "top"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Non-negotiables (enforced, not promised)",
+      "items": [
+        "CRITICAL failures raise gates; gates need a human decision — no auto-approve path exists",
+        "Room B advisors receive report cards only — never credentials, never the execution path",
+        "Kill switch halts every sweep; every gate decision lands in the append-only audit log"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Extending the crew",
+      "items": [
+        "A new project is one profile JSON: expectations, advisor persona, scopes, budgets",
+        "Five expectation primitives (http · sql · cli · file · metric); new capabilities are config, not code",
+        "MCP handshake hashes tool schemas at connect — silent drift fails closed into the inbox"
+      ]
+    }
+  ]
+}
